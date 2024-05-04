@@ -1,0 +1,29 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: op-maw
+webhooks:
+  - name: op-maw.moustafab.io
+    clientConfig:
+      caBundle: "${CA_PEM_B64}"
+      url: "https://host.docker.internal:8080/mutate"
+      # service:
+      #   name: op-maw
+      #   namespace: default
+      #   path: "/mutate"
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    failurePolicy: Fail
+    admissionReviewVersions: ["v1", "v1beta1"]
+    sideEffects: None
+    timeoutSeconds: 5
