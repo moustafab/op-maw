@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{env::current_dir, net::SocketAddr};
 
 use axum::{routing::post, Json, Router};
 use axum_server::tls_rustls::RustlsConfig;
@@ -7,7 +7,7 @@ use kube::core::{
     admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
     DynamicObject, ResourceExt,
 };
-use tracing::{info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 #[tokio::main]
 async fn main() {
@@ -22,13 +22,22 @@ async fn main() {
     let listener = std::net::TcpListener::bind(addr).unwrap();
 
     if std::env::var("TLS_ENABLED").is_ok_and(|var| var == "true") {
+        let current_dir = current_dir().unwrap();
+        debug!("current dir: {:?}", current_dir);
+        let cert_file = current_dir
+            .clone()
+            .join(std::env::var("CERT_PEM").expect("CERT_PEM is not set"));
+        debug!("loading cert from {:?}", cert_file);
+
+        let private_key_file = current_dir
+            .clone()
+            .join(std::env::var("KEY_PEM").expect("KEY_PEM is not set"));
+        debug!("loading private key from {:?}", private_key_file);
+
         // configure certificate and private key used by https
-        let config = RustlsConfig::from_pem_file(
-            PathBuf::from(std::env::var("CERT_PEM").expect("CERT_PEM is not set")),
-            PathBuf::from(std::env::var("KEY_PEM").expect("KEY_PEM is not set")),
-        )
-        .await
-        .unwrap();
+        let config = RustlsConfig::from_pem_file(cert_file, private_key_file)
+            .await
+            .unwrap();
 
         tracing::info!("starting with TLS");
         axum_server::from_tcp_rustls(listener, config)
@@ -36,7 +45,7 @@ async fn main() {
             .await
             .unwrap();
     } else {
-        tracing::info!("starting without TLS s");
+        tracing::info!("starting without TLS");
         axum_server::from_tcp(listener)
             .serve(app.into_make_service())
             .await
@@ -45,29 +54,34 @@ async fn main() {
 }
 
 async fn mutate_handler(
-    Json(payload): Json<AdmissionRequest<DynamicObject>>,
+    Json(payload): Json<AdmissionReview<Pod>>,
 ) -> Json<AdmissionReview<DynamicObject>> {
-    tracing::info!("hit server with valid request ");
-    let mut res = AdmissionResponse::from(&payload);
-
-    if let Some(obj) = payload.object {
-        match obj.try_parse::<Pod>() {
-            Ok(pod) => {
-                let name = pod.name_any();
-                res = match mutate_pod(res.clone(), &pod) {
-                    Ok(res) => {
-                        info!("accepted: {:?} on Pod {}", payload.operation, name);
-                        res
-                    }
-                    Err(err) => {
-                        warn!("denied: {:?} on {} ({})", payload.operation, name, err);
-                        res.deny(err.to_string())
-                    }
-                };
-            }
-            Err(_) => return Json(res.into_review()),
+    tracing::trace!(?payload, "hit server with valid request");
+    let req: AdmissionRequest<Pod> = match payload.try_into() {
+        Ok(req) => req,
+        Err(err) => {
+            error!("invalid request: {}", err.to_string());
+            return Json(AdmissionResponse::invalid(err.to_string()).into_review());
         }
     };
+    trace!(?req, "parsed request");
+
+    let mut res = AdmissionResponse::from(&req);
+
+    if let Some(pod) = req.object {
+        let name = pod.name_any();
+        res = match mutate_pod(res.clone(), &pod) {
+            Ok(res) => {
+                info!("accepted: {:?} on Pod {}", req.operation, name);
+                res
+            }
+            Err(err) => {
+                warn!("denied: {:?} on {} ({})", req.operation, name, err);
+                res.deny(err.to_string())
+            }
+        };
+    };
+    debug!(?res, "returning response");
     Json(res.into_review())
 }
 
@@ -105,8 +119,10 @@ fn mutate_pod(res: AdmissionResponse, pod: &Pod) -> anyhow::Result<AdmissionResp
                 ))
             }
         }
-        Ok(res.with_patch(json_patch::Patch(patches))?)
-    } else {
-        Ok(res)
+        if !patches.is_empty() {
+            debug!(len=%patches.len(), "applying patches");
+            return Ok(res.with_patch(json_patch::Patch(patches))?);
+        }
     }
+    Ok(res)
 }

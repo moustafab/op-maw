@@ -44,9 +44,5 @@ sed -e 's@${CA_PEM_B64}@'"$CA_PEM64"'@g' < deploy/mutating_webhook_config.yaml |
 # Sanity:
 kubectl get mutatingwebhookconfiguration op-maw -oyaml
 
-TLS_ENABLED=true \
-CERT_PEM="certs/op-maw-tls.crt" \
-KEY_PEM="certs/op-maw-tls.key" \
-RUST_LOG="info,op_maw=debug" \
-cargo run
+cargo watch -w . -x run -L "info,op_maw=debug" -E 'TLS_ENABLED=true' -E 'CERT_PEM=certs/op-maw-tls.crt' -E 'KEY_PEM=certs/op-maw-tls.key'
 
